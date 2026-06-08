@@ -1,6 +1,6 @@
 /**
- * Grid.js - 棋盘系统
- * P0 版：6×7 棋盘，拖拽合成 + 连锁合成
+ * Grid.js - 棋盘系统 V2
+ * 6×7 棋盘，点击拾取+点击放置合成，连锁合成
  */
 
 class Grid {
@@ -8,6 +8,7 @@ class Grid {
     this.rows = rows;
     this.cols = cols;
     this.cells = new Array(rows * cols).fill(null);
+    this.selectedItem = null;  // { row, col }
   }
 
   /** 获取物品 */
@@ -45,7 +46,7 @@ class Grid {
            item1.level < ITEM_MAX_LEVELS[item1.type];
   }
 
-  /** 执行合成 */
+  /** 执行合成，返回合成结果和连锁合成列表 */
   merge(row1, col1, row2, col2) {
     const item = this.getItem(row1, col1);
     if (!item) return null;
@@ -65,13 +66,63 @@ class Grid {
     gameState.statistics.totalMerges++;
     gameState.addExp(newLevel * 2);
 
-    return { item: newItem, pos: { row: row1, col: col1 }, chainMerges: [] };
+    // 检查连锁合成
+    const chainResults = this._checkChainMerge(row1, col1);
+
+    return {
+      item: newItem,
+      pos: { row: row1, col: col1 },
+      chainMerges: chainResults
+    };
+  }
+
+  /** 递归检查连锁合成 */
+  _checkChainMerge(row, col) {
+    const results = [];
+    const item = this.getItem(row, col);
+    if (!item) return results;
+
+    const neighbors = this.getNeighbors(row, col);
+    for (const n of neighbors) {
+      const neighbor = this.getItem(n.row, n.col);
+      if (this.canMerge(item, neighbor)) {
+        // 连锁合成！
+        const newLevel = item.level + 1;
+        const newItem = {
+          id: generateId(),
+          type: item.type,
+          level: newLevel,
+          emoji: ITEM_EMOJIS[item.type][newLevel]
+        };
+        this.setItem(row, col, newItem);
+        this.setItem(n.row, n.col, null);
+        results.push({ pos: { row, col }, item: newItem });
+        gameState.statistics.totalMerges++;
+        gameState.addExp(newLevel * 2);
+        // 继续递归
+        const more = this._checkChainMerge(row, col);
+        results.push(...more);
+        break; // 一次只合成一个
+      }
+    }
+    return results;
   }
 
   /** 尝试放置物品到棋盘 */
   placeItem(item) {
     const cell = this.findEmptyCell();
     if (!cell) return null;
+    // 如果有选中物品，放到选中位置附近
+    if (this.selectedItem) {
+      const sel = this.selectedItem;
+      const neighbors = this.getNeighbors(sel.row, sel.col);
+      for (const n of neighbors) {
+        if (!this.getItem(n.row, n.col)) {
+          this.setItem(n.row, n.col, item);
+          return n;
+        }
+      }
+    }
     this.setItem(cell.row, cell.col, item);
     return cell;
   }
@@ -84,7 +135,7 @@ class Grid {
     this.setItem(row2, col2, item1);
   }
 
-  /** 获取相邻格子 */
+  /** 获取相邻格子（上下左右） */
   getNeighbors(row, col) {
     const dirs = [[-1,0],[1,0],[0,-1],[0,1]];
     return dirs
@@ -92,18 +143,42 @@ class Grid {
       .filter(({ row: r, col: c }) => r >= 0 && r < this.rows && c >= 0 && c < this.cols);
   }
 
-  /** 检查某位置是否有可合成的邻居（用于连锁合成） */
-  findMergeableNeighbor(row, col) {
+  /** 获取所有相邻格子的物品 */
+  getNeighborItems(row, col) {
+    return this.getNeighbors(row, col)
+      .map(n => ({ ...n, item: this.getItem(n.row, n.col) }))
+      .filter(n => n.item !== null);
+  }
+
+  /** 选中/取消选中格子 */
+  toggleSelect(row, col) {
     const item = this.getItem(row, col);
-    if (!item) return null;
-    const neighbors = this.getNeighbors(row, col);
-    for (const n of neighbors) {
-      const neighbor = this.getItem(n.row, n.col);
-      if (this.canMerge(item, neighbor)) {
-        return n;
+    if (!item) {
+      this.selectedItem = null;
+      return null;
+    }
+    if (this.selectedItem && this.selectedItem.row === row && this.selectedItem.col === col) {
+      this.selectedItem = null;
+      return null;
+    }
+    // 如果已经有选中的，尝试合成或交换
+    if (this.selectedItem) {
+      const sel = this.selectedItem;
+      const selItem = this.getItem(sel.row, sel.col);
+      if (this.canMerge(selItem, item)) {
+        // 合成
+        const result = this.merge(sel.row, sel.col, row, col);
+        this.selectedItem = null;
+        return { action: 'merge', result };
+      } else {
+        // 交换
+        this.swap(sel.row, sel.col, row, col);
+        this.selectedItem = { row, col };
+        return { action: 'swap', from: sel, to: { row, col } };
       }
     }
-    return null;
+    this.selectedItem = { row, col };
+    return { action: 'select', pos: { row, col } };
   }
 
   /** 序列化 */
@@ -127,28 +202,36 @@ const grid = new Grid();
 const ITEM_TYPES = {
   BREAD: 'bread',
   COFFEE: 'coffee',
-  FLOWER: 'flower'
+  FLOWER: 'flower',
+  TOOL: 'tool',
+  DECOR: 'decor'
 };
 
 /** 每种物品的最高等级 */
 const ITEM_MAX_LEVELS = {
-  bread: 5,
-  coffee: 5,
-  flower: 5
+  bread: 6,
+  coffee: 6,
+  flower: 6,
+  tool: 5,
+  decor: 5
 };
 
 /** 每种物品各等级的 emoji */
 const ITEM_EMOJIS = {
-  bread: ['', '🌾', '🥣', '🫓', '🍞', '🎂'],
-  coffee: ['', '🫘', '🟤', '☕', '🥛☕', '🧋'],
-  flower: ['', '🌱', '🌿', '🌸', '💐', '🌺']
+  bread: ['', '🌾', '🥣', '🫓', '🍞', '🥪', '🎂'],
+  coffee: ['', '🫘', '🟤', '☕', '🥛☕', '🧋', '🏆☕'],
+  flower: ['', '🌱', '🌿', '🌸', '💐', '🌺', '🌳'],
+  tool: ['', '🪵', '🔨', '⚙️', '🔧', '⚡'],
+  decor: ['', '🧵', '👗', '👑', '💎', '✨']
 };
 
 /** 每种物品的名称 */
 const ITEM_NAMES = {
-  bread: ['', '小麦', '面粉', '面团', '面包', '蛋糕'],
-  coffee: ['', '咖啡豆', '咖啡粉', '黑咖啡', '拿铁', '特调咖啡'],
-  flower: ['', '种子', '幼苗', '花朵', '花束', '花园']
+  bread: ['', '小麦', '面粉', '面团', '面包', '三明治', '蛋糕'],
+  coffee: ['', '咖啡豆', '咖啡粉', '黑咖啡', '拿铁', '特调咖啡', '完美咖啡'],
+  flower: ['', '种子', '幼苗', '花朵', '花束', '花园', '花树'],
+  tool: ['', '木材', '工具', '零件', '机械', '引擎'],
+  decor: ['', '布料', '衣服', '皇冠', '珠宝', '魔法物品']
 };
 
 /** 生成唯一 ID */
