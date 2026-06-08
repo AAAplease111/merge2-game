@@ -1,6 +1,7 @@
 /**
- * UI.js - UI 渲染与交互 V2
- * 全面重写：点击拾取+点击放置合成、生成器冷却条、建筑面板
+ * UI.js - UI 渲染与交互 V3
+ * 拖拽合成 + 点击选中提交订单
+ * 手机端：touch 事件模拟拖拽
  */
 
 class UI {
@@ -9,7 +10,12 @@ class UI {
     this.energyTimer = null;
     this.autoTimer = null;
     this.saveTimer = null;
-    this.cooldownTimers = {};
+    this.cooldownTimer = null;
+
+    // 拖拽状态
+    this.dragItem = null;
+    this.dragFrom = null;
+    this.isDragging = false;
   }
 
   init() {
@@ -19,18 +25,12 @@ class UI {
     this._renderAll();
     this._startTimers();
     this._bindGlobalEvents();
-    this._bindGridEvents();
 
-    // 如果没有订单，生成
-    if (!orderSystem.mainOrder) {
-      orderSystem.generateMainOrder();
-    }
-    if (orderSystem.sideOrders.length === 0) {
-      orderSystem.generateSideOrder();
-    }
+    if (!orderSystem.mainOrder) orderSystem.generateMainOrder();
+    if (orderSystem.sideOrders.length === 0) orderSystem.generateSideOrder();
     this._renderOrders();
 
-    console.log('✅ UI 初始化完成');
+    console.log('UI init done');
   }
 
   _renderAll() {
@@ -41,30 +41,26 @@ class UI {
   }
 
   // ===== 顶部状态栏 =====
-
   _renderTopBar() {
     const bar = document.getElementById('top-bar');
     if (!bar) return;
-
     const exp = gameState.getExpProgress();
-    bar.innerHTML = `
-      <div class="top-bar-left">
-        <span class="level-badge">Lv.${gameState.level}</span>
-        <div class="exp-bar-container">
-          <div class="exp-bar" style="width:${exp.pct}%"></div>
-          <span class="exp-text">${exp.current}/${exp.max}</span>
-        </div>
-      </div>
-      <div class="top-bar-right">
-        <span class="resource energy-display">⚡ ${gameState.energy}/${gameState.maxEnergy}</span>
-        <span class="resource">🪙 ${gameState.coins}</span>
-        <span class="resource">💎 ${gameState.diamonds}</span>
-      </div>
-    `;
+    bar.innerHTML = [
+      '<div class="top-bar-left">',
+      '<span class="level-badge">Lv.' + gameState.level + '</span>',
+      '<div class="exp-bar-container">',
+      '<div class="exp-bar" style="width:' + exp.pct + '%"></div>',
+      '<span class="exp-text">' + exp.current + '/' + exp.max + '</span>',
+      '</div></div>',
+      '<div class="top-bar-right">',
+      '<span class="resource energy-display">⚡ ' + gameState.energy + '/' + gameState.maxEnergy + '</span>',
+      '<span class="resource">🪙 ' + gameState.coins + '</span>',
+      '<span class="resource">💎 ' + gameState.diamonds + '</span>',
+      '</div>'
+    ].join('');
   }
 
   // ===== 棋盘 =====
-
   _renderGrid() {
     const container = document.getElementById('grid-container');
     if (!container) return;
@@ -79,186 +75,299 @@ class UI {
 
         const item = grid.getItem(r, c);
         if (item) {
-          cell.classList.add('has-item', `level-${item.level}`);
-          const isSelected = grid.selectedItem &&
-            grid.selectedItem.row === r &&
-            grid.selectedItem.col === c;
-          if (isSelected) cell.classList.add('selected');
+          cell.classList.add('has-item', 'level-' + item.level);
+          cell.innerHTML = '' +
+            '<div class="grid-item" draggable="true">' +
+            '<span class="item-emoji">' + item.emoji + '</span>' +
+            '<span class="item-level">Lv.' + item.level + '</span>' +
+            '</div>';
 
-          cell.innerHTML = `
-            <div class="grid-item">
-              <span class="item-emoji">${item.emoji}</span>
-              <span class="item-level">Lv.${item.level}</span>
-            </div>
-          `;
+          const gridItem = cell.querySelector('.grid-item');
+          // 鼠标拖拽
+          gridItem.addEventListener('dragstart', (function(ui, r, c, item) {
+            return function(e) { ui._onDragStart(e, r, c, item); };
+          })(this, r, c, item));
+          gridItem.addEventListener('dragend', (function(ui) {
+            return function(e) { ui._onDragEnd(e); };
+          })(this));
+
+          // 触摸拖拽（手机）
+          gridItem.addEventListener('touchstart', (function(ui, r, c, item) {
+            return function(e) { ui._onTouchStart(e, r, c, item); };
+          })(this, r, c, item), { passive: false });
+          gridItem.addEventListener('touchmove', (function(ui) {
+            return function(e) { ui._onTouchMove(e); };
+          })(this), { passive: false });
+          gridItem.addEventListener('touchend', (function(ui, r, c) {
+            return function(e) { ui._onTouchEnd(e, r, c); };
+          })(this, r, c), { passive: false });
         }
 
-        // 点击事件
-        cell.addEventListener('click', (e) => {
-          e.stopPropagation();
-          this._onCellClick(r, c);
-        });
+        // 放置目标
+        cell.addEventListener('dragover', function(e) { e.preventDefault(); cell.classList.add('drop-target'); });
+        cell.addEventListener('dragleave', function() { cell.classList.remove('drop-target'); });
+        cell.addEventListener('drop', (function(ui, r, c) {
+          return function(e) { e.preventDefault(); cell.classList.remove('drop-target'); ui._onDrop(r, c); };
+        })(this, r, c));
+
+        // 点击选中（提交订单）
+        cell.addEventListener('click', (function(ui, r, c) {
+          return function(e) {
+            if (ui.isDragging) return;
+            ui._onCellClick(r, c);
+          };
+        })(this, r, c));
 
         container.appendChild(cell);
       }
     }
   }
 
-  _onCellClick(row, col) {
-    const item = grid.getItem(row, col);
-    const result = grid.toggleSelect(row, col);
+  // ===== 鼠标拖拽 =====
+  _onDragStart(e, row, col, item) {
+    this.dragItem = item;
+    this.dragFrom = { row: row, col: col };
+    this.isDragging = true;
+    e.dataTransfer.setData('text/plain', row + ',' + col);
+    e.dataTransfer.effectAllowed = 'move';
+    var cell = e.target.closest('.grid-cell');
+    if (cell) cell.classList.add('dragging');
+  }
 
-    if (!result) {
-      // 取消选中
-      this._renderGrid();
+  _onDragEnd(e) {
+    this.isDragging = false;
+    var els = document.querySelectorAll('.grid-cell.dragging');
+    for (var i = 0; i < els.length; i++) els[i].classList.remove('dragging');
+    els = document.querySelectorAll('.drop-target');
+    for (var i = 0; i < els.length; i++) els[i].classList.remove('drop-target');
+  }
+
+  _onDrop(toRow, toCol) {
+    if (!this.dragFrom) return;
+    var from = this.dragFrom;
+    this.isDragging = false;
+    this.dragItem = null;
+    this.dragFrom = null;
+
+    if (from.row === toRow && from.col === toCol) return;
+
+    var item1 = grid.getItem(from.row, from.col);
+    var item2 = grid.getItem(toRow, toCol);
+
+    if (item1 && item2 && grid.canMerge(item1, item2)) {
+      // 合成！
+      var result = grid.merge(from.row, from.col, toRow, toCol);
+      if (result) {
+        this._showMergeEffect(toRow, toCol);
+        this._renderAll();
+        this._autoSave();
+      }
+    } else if (item1 && !item2) {
+      // 拖到空位
+      grid.swap(from.row, from.col, toRow, toCol);
+      this._renderAll();
+    } else if (item1 && item2) {
+      // 交换
+      grid.swap(from.row, from.col, toRow, toCol);
+      this._renderAll();
+    }
+  }
+
+  // ===== 触摸拖拽（手机端） =====
+  _onTouchStart(e, row, col, item) {
+    // 长按才触发拖拽，短按是点击
+    this._touchStartTime = Date.now();
+    this._touchStartPos = { row: row, col: col, item: item };
+    this._touchMoved = false;
+    this._touchDragTimer = setTimeout((function(ui) {
+      return function() {
+        ui._startTouchDrag();
+      };
+    })(this), 200);
+  }
+
+  _startTouchDrag() {
+    if (!this._touchStartPos) return;
+    this.isDragging = true;
+    this.dragItem = this._touchStartPos.item;
+    this.dragFrom = { row: this._touchStartPos.row, col: this._touchStartPos.col };
+
+    // 创建视觉克隆
+    var cell = document.querySelector(
+      '.grid-cell[data-row="' + this._touchStartPos.row + '"][data-col="' + this._touchStartPos.col + '"]'
+    );
+    if (!cell) return;
+    cell.classList.add('dragging');
+
+    // 创建跟随手指的克隆
+    var clone = document.createElement('div');
+    clone.className = 'touch-drag-clone';
+    clone.textContent = this.dragItem.emoji;
+    clone.style.position = 'fixed';
+    clone.style.fontSize = '36px';
+    clone.style.pointerEvents = 'none';
+    clone.style.zIndex = '9999';
+    clone.style.transform = 'translate(-50%, -50%)';
+    clone.style.left = this._touchClientX + 'px';
+    clone.style.top = this._touchClientY + 'px';
+    document.body.appendChild(clone);
+    this._dragClone = clone;
+  }
+
+  _onTouchMove(e) {
+    this._touchMoved = true;
+    if (this._touchDragTimer) {
+      clearTimeout(this._touchDragTimer);
+      this._touchDragTimer = null;
+    }
+    if (this._dragClone) {
+      var touch = e.touches[0];
+      this._touchClientX = touch.clientX;
+      this._touchClientY = touch.clientY;
+      this._dragClone.style.left = touch.clientX + 'px';
+      this._dragClone.style.top = touch.clientY + 'px';
+    }
+  }
+
+  _onTouchEnd(e, origRow, origCol) {
+    if (this._touchDragTimer) {
+      clearTimeout(this._touchDragTimer);
+      this._touchDragTimer = null;
+    }
+
+    // 移除克隆
+    if (this._dragClone) {
+      document.body.removeChild(this._dragClone);
+      this._dragClone = null;
+    }
+
+    // 如果拖拽过，找目标格子
+    if (this.isDragging && this.dragFrom) {
+      var touch = e.changedTouches[0];
+      var target = document.elementFromPoint(touch.clientX, touch.clientY);
+      var targetCell = target ? target.closest(".grid-cell") : null;
+      if (targetCell) {
+        var toRow = parseInt(targetCell.dataset.row);
+        var toCol = parseInt(targetCell.dataset.col);
+        this._onDrop(toRow, toCol);
+      } else {
+        // 拖到棋盘外，取消
+        this.isDragging = false;
+        this.dragItem = null;
+        this.dragFrom = null;
+        var els = document.querySelectorAll('.grid-cell.dragging');
+        for (var i = 0; i < els.length; i++) els[i].classList.remove('dragging');
+      }
       return;
     }
 
-    switch (result.action) {
-      case 'select':
-        this._renderGrid();
-        this._showItemMenu(row, col);
-        break;
-      case 'merge':
-        if (result.result) {
-          this._showMergeEffect(row, col);
-          // 连锁合成
-          if (result.result.chainMerges && result.result.chainMerges.length > 0) {
-            for (const chain of result.result.chainMerges) {
-              this._showMergeEffect(chain.pos.row, chain.pos.col);
-            }
-          }
-          this._renderAll();
-          this._autoSave();
-        } else {
-          this._renderGrid();
-        }
-        break;
-      case 'swap':
-        this._renderGrid();
-        // 检查是否有合成机会
-        this._checkAutoMerge();
-        this._autoSave();
-        break;
+    // 没有拖拽，视为点击
+    if (!this._touchMoved) {
+      this._onCellClick(origRow, origCol);
     }
   }
 
-  /** 检查棋盘上是否有可以合成的相邻物品 */
-  _checkAutoMerge() {
-    let merged = false;
-    for (let r = 0; r < grid.rows; r++) {
-      for (let c = 0; c < grid.cols; c++) {
-        const item = grid.getItem(r, c);
-        if (!item) continue;
-        const neighbors = grid.getNeighborItems(r, c);
-        for (const n of neighbors) {
-          if (grid.canMerge(item, n.item)) {
-            const result = grid.merge(r, c, n.row, n.col);
-            if (result) {
-              this._showMergeEffect(r, c);
-              merged = true;
-              // 继续递归检查
-              this._checkAutoMerge();
-              return;
-            }
-          }
-        }
-      }
-    }
-    if (merged) this._renderAll();
-  }
-
-  // ===== 物品操作菜单 =====
-
-  _showItemMenu(row, col) {
-    const item = grid.getItem(row, col);
+  // ===== 点击选中（提交订单） =====
+  _onCellClick(row, col) {
+    var item = grid.getItem(row, col);
     if (!item) return;
 
-    const modal = document.getElementById('item-menu');
+    // 显示操作菜单
+    this._showItemMenu(row, colAlgorithm);
+  }
+
+  _showItemMenu(row, col) {
+    var item = grid.getItem(row, col);
+    if (!item) return;
+
+    var modal = document.getElementById('item-menu');
     if (!modal) return;
 
-    const name = ITEM_NAMES[item.type][item.level] || '未知物品';
-    const emoji = item.emoji;
+    var name = ITEM_NAMES[item.type][item.level] || '未知';
+    var emoji = item.emoji;
 
     // 检查哪些订单能接受这个物品
-    const orderOptions = [];
+    var orderOptions = [];
     if (orderSystem.mainOrder && !orderSystem.mainOrder.completed) {
-      const canSubmit = orderSystem.mainOrder.requires.some(r =>
-        r.type === item.type && r.level === item.level && r.current < r.count
-      );
-      if (canSubmit) {
-        orderOptions.push({ id: orderSystem.mainOrder.id, label: '📋 主线订单' });
+      var canSubmit = false;
+      for (var i = 0; i < orderSystem.mainOrder.requires.length; i++) {
+        var r = orderSystem.mainOrder.requires[i];
+        if (r.type === item.type && r.level === item.level && r.current < r.count) {
+          canSubmit = true;
+          break;
+        }
       }
+      if (canSubmit) orderOptions.push({ id: orderSystem.mainOrder.id, label: '主线订单' });
     }
-    for (const so of orderSystem.sideOrders) {
+    for (var si = 0; si < orderSystem.sideOrders.length; si++) {
+      var so = orderSystem.sideOrders[si];
       if (so.completed) continue;
-      const canSubmit = so.requires.some(r =>
-        r.type === item.type && r.level === item.level && r.current < r.count
-      );
-      if (canSubmit) {
-        orderOptions.push({ id: so.id, label: `📌 ${so.title}` });
+      var canSubmit = false;
+      for (var j = 0; j < so.requires.length; j++) {
+        var r = so.requires[j];
+        if (r.type === item.type && r.level === item.level && r.current < r.count) {
+          canSubmit = true;
+          break;
+        }
       }
+      if (canSubmit) orderOptions.push({ id: so.id, label: so.title });
     }
 
-    let actionsHtml = '';
+    var html = '' +
+      '<div class="menu-backdrop" onclick="ui._hideItemMenu()"></div>' +
+      '<div class="menu-content">' +
+      '<div class="menu-item-preview">' +
+      '<span class="menu-emoji">' + emoji + '</span>' +
+      '<span class="menu-name">' + name + ' Lv.' + item.level + '</span>' +
+      '</div><div class="menu-actions">';
+
     if (orderOptions.length > 0) {
-      actionsHtml += orderOptions.map(o =>
-        `<button class="menu-btn submit-btn" data-order-id="${o.id}" data-row="${row}" data-col="${col}">${o.label} 提交</button>`
-      ).join('');
+      for (var oi = 0; oi < orderOptions.length; oi++) {
+        var opt = orderOptions[oi];
+        html += '<button class="menu-btn submit-btn" data-order-id="' + opt.id + '" data-row="' + row + '" data-col="' + col + '">' + opt.label + ' 提交</button>';
+      }
     } else {
-      actionsHtml += `<div class="menu-no-match">当前没有订单需要这个物品</div>`;
+      html += '<div class="menu-no-match">当前没有订单需要这个物品</div>';
     }
-    actionsHtml += `<button class="menu-btn cancel-btn" onclick="ui._hideItemMenu()">取消</button>`;
+    html += '<button class="menu-btn cancel-btn" onclick="ui._hideItemMenu()">取消</button>';
+    html += '</div></div>';
 
-    modal.innerHTML = `
-      <div class="menu-backdrop" onclick="ui._hideItemMenu()"></div>
-      <div class="menu-content">
-        <div class="menu-item-preview">
-          <span class="menu-emoji">${emoji}</span>
-          <span class="menu-name">${name} Lv.${item.level}</span>
-        </div>
-        <div class="menu-actions">
-          ${actionsHtml}
-        </div>
-      </div>
-    `;
+    modal.innerHTML = html;
     modal.classList.remove('hidden');
 
     // 绑定提交事件
-    modal.querySelectorAll('.submit-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        const orderId = btn.dataset.orderId;
-        const row = parseInt(btn.dataset.row);
-        const col = parseInt(btn.dataset.col);
-        this._submitToOrder(orderId, row, col);
-      });
-    });
+    var btns = modal.querySelectorAll('.submit-btn');
+    for (var bi = 0; bi < btns.length; bi++) {
+      (function(ui, btn) {
+        btn.addEventListener('click', function() {
+          var orderId = btn.dataset.orderId;
+          var row2 = parseInt(btn.dataset.row);
+          var col2 = parseInt(btn.dataset.col);
+          ui._submitToOrder(orderId, row2, col2);
+        });
+      })(this, btns[bi]);
+    }
   }
 
   _hideItemMenu() {
-    const modal = document.getElementById('item-menu');
+    var modal = document.getElementById('item-menu');
     if (modal) modal.classList.add('hidden');
-    grid.selectedItem = null;
-    this._renderGrid();
   }
 
   _submitToOrder(orderId, row, col) {
-    const result = orderSystem.submitItem(orderId, row, col);
+    var result = orderSystem.submitItem(orderId, row, col);
     if (result.success) {
       this._hideItemMenu();
-
-      // 检查订单是否完成
       if (result.order.completed) {
         this._showReward(result.order.rewards);
-        // 支线订单完成后，过一会儿自动生成新支线
         if (result.order.type === 'side') {
-          setTimeout(() => {
+          var self = this;
+          setTimeout(function() {
             orderSystem.generateSideOrder();
-            this._renderOrders();
+            self._renderOrders();
           }, 1000);
         }
       }
-
       this._renderAll();
       this._autoSave();
     } else {
@@ -267,101 +376,100 @@ class UI {
   }
 
   // ===== 订单面板 =====
-
   _renderOrders() {
-    const panel = document.getElementById('order-panel');
+    var panel = document.getElementById('order-panel');
     if (!panel) return;
     panel.innerHTML = '';
 
     // 主线订单
     if (orderSystem.mainOrder) {
-      const mo = orderSystem.mainOrder;
-      const moDiv = document.createElement('div');
-      moDiv.className = `order-card main-order ${mo.completed ? 'completed' : ''}`;
-      moDiv.innerHTML = `
-        <div class="order-header">
-          <span class="order-emoji">${mo.emoji}</span>
-          <span class="order-title">${mo.title}</span>
-          ${mo.completed ? '<span class="order-done">✅</span>' : ''}
-        </div>
-        <div class="order-desc">${mo.description}</div>
-        <div class="order-progress">${orderSystem.getProgressText(mo)}</div>
-        <div class="order-reward">🪙 ${mo.rewards.coins} ⭐ ${mo.rewards.exp}${mo.rewards.diamonds ? ' 💎 +' + mo.rewards.diamonds : ''}</div>
-      `;
+      var mo = orderSystem.mainOrder;
+      var moDiv = document.createElement('div');
+      moDiv.className = 'order-card main-order' + (mo.completed ? ' completed' : '');
+      var moHtml = '' +
+        '<div class="order-header">' +
+        '<span class="order-emoji">' + mo.emoji + '</span>' +
+        '<span class="order-title">' + mo.title + '</span>' +
+        (mo.completed ? '<span class="order-done">OK</span>' : '') +
+        '</div>' +
+        '<div class="order-desc">' + mo.description + '</div>' +
+        '<div class="order-progress">' + orderSystem.getProgressText(mo) + '</div>' +
+        '<div class="order-reward">' + mo.rewards.coins + 'g ' + mo.rewards.exp + 'xp' + (mo.rewards.diamonds ? ' di' + mo.rewards.diamonds : '') + '</div>';
+      moDiv.innerHTML = moHtml;
       panel.appendChild(moDiv);
     } else {
-      // 没有主线订单时生成一个
       orderSystem.generateMainOrder();
       this._renderOrders();
       return;
     }
 
     // 支线订单
-    for (const so of orderSystem.sideOrders) {
-      const soDiv = document.createElement('div');
-      soDiv.className = `order-card side-order ${so.completed ? 'completed' : ''}`;
-      soDiv.innerHTML = `
-        <div class="order-header">
-          <span class="order-emoji">${so.emoji}</span>
-          <span class="order-title">${so.title}</span>
-          ${so.completed ? '<span class="order-done">✅</span>' : ''}
-        </div>
-        <div class="order-desc">${so.description}</div>
-        <div class="order-progress">${orderSystem.getProgressText(so)}</div>
-        <div class="order-reward">🪙 ${so.rewards.coins} ⭐ ${so.rewards.exp}${so.rewards.diamonds ? ' 💎 +' + so.rewards.diamonds : ''}</div>
-      `;
+    for (var si = 0; si < orderSystem.sideOrders.length; si++) {
+      var so = orderSystem.sideOrders[si];
+      var soDiv = document.createElement('div');
+      soDiv.className = 'order-card side-order' + (so.completed ? ' completed' : '');
+      var soHtml = '' +
+        '<div class="order-header">' +
+        '<span class="order-emoji">' + so.emoji + '</span>' +
+        '<span class="order-title">' + so.title + '</span>' +
+        (so.completed ? '<span class="order-done">OK</span>' : '') +
+        '</div>' +
+        '<div class="order-desc">' + so.description + '</div>' +
+        '<div class="order-progress">' + orderSystem.getProgressText(so) + '</div>' +
+        '<div class="order-reward">' + so.rewards.coins + 'g ' + so.rewards.exp + 'xp' + (so.rewards.diamonds ? ' di' + so.rewards.diamonds : '') + '</div>';
+      soDiv.innerHTML = soHtml;
       panel.appendChild(soDiv);
     }
 
-    // 添加支线订单按钮
+    // 添加支线按钮
     if (orderSystem.sideOrders.length < orderSystem.maxSideOrders) {
-      const addBtn = document.createElement('button');
+      var addBtn = document.createElement('button');
       addBtn.className = 'add-order-btn';
       addBtn.textContent = '+ 接取支线';
-      addBtn.onclick = () => {
+      var self = this;
+      addBtn.onclick = function() {
         orderSystem.generateSideOrder();
-        this._renderOrders();
+        self._renderOrders();
       };
       panel.appendChild(addBtn);
     }
   }
 
   // ===== 生成器栏 =====
-
   _renderGenerators() {
-    const bar = document.getElementById('generator-bar');
+    var bar = document.getElementById('generator-bar');
     if (!bar) return;
     bar.innerHTML = '';
 
-    const generators = getAllGenerators();
-    for (const gen of generators) {
-      const div = document.createElement('div');
-      div.className = `generator-btn ${gen.unlocked ? 'unlocked' : 'locked'}`;
+    var generators = getAllGenerators();
+    for (var gi = 0; gi < generators.length; gi++) {
+      var gen = generators[gi];
+      var div = document.createElement('div');
+      div.className = 'generator-btn' + (gen.unlocked ? ' unlocked' : ' locked');
       div.title = gen.description;
 
       if (gen.unlocked) {
-        const remaining = gen.remainingCooldown;
-        const isOnCooldown = gen.onCooldown;
-        div.innerHTML = `
-          <div class="gen-emoji">${gen.emoji}</div>
-          <div class="gen-name">${gen.name}</div>
-          <div class="gen-level">Lv.${gen.level}</div>
-          ${isOnCooldown
-            ? `<div class="gen-cooldown" data-gen="${gen.id}">⏳ ${remaining}s</div>`
-            : `<div class="gen-ready">✅ 就绪</div>`
-          }
-        `;
-        div.onclick = () => this._onGeneratorClick(gen.id);
+        var remaining = gen.remainingCooldown;
+        var isOnCooldown = gen.onCooldown;
+        div.innerHTML = '' +
+          '<div class="gen-emoji">' + gen.emoji + '</div>' +
+          '<div class="gen-name">' + gen.name + '</div>' +
+          '<div class="gen-level">Lv.' + gen.level + '</div>' +
+          (isOnCooldown
+            ? '<div class="gen-cooldown" data-gen="' + gen.id + '">' + remaining + 's</div>'
+            : '<div class="gen-ready">Ready</div>');
+        div.onclick = (function(ui, genId) {
+          return function() { ui._onGeneratorClick(genId); };
+        })(this, gen.id);
         if (isOnCooldown) div.classList.add('on-cooldown');
       } else {
-        const unlockInfo = gen.unlockBuilding
-          ? `🏪 ${BUILDING_CONFIGS[gen.unlockBuilding]?.name || gen.unlockBuilding}`
-          : `Lv.${gen.unlockLevel} 解锁`;
-        div.innerHTML = `
-          <div class="gen-emoji">🔒</div>
-          <div class="gen-name">${gen.name}</div>
-          <div class="gen-lock-info">${unlockInfo}</div>
-        `;
+        var unlockInfo = gen.unlockBuilding
+          ? (BUILDING_CONFIGS[gen.unlockBuilding] ? BUILDING_CONFIGS[gen.unlockBuilding].name : gen.unlockBuilding)
+          : 'Lv.' + gen.unlockLevel;
+        div.innerHTML = '' +
+          '<div class="gen-emoji">LOCK</div>' +
+          '<div class="gen-name">' + gen.name + '</div>' +
+          '<div class="gen-lock-info">' + unlockInfo + '</div>';
       }
 
       bar.appendChild(div);
@@ -369,27 +477,25 @@ class UI {
   }
 
   _onGeneratorClick(genId) {
-    const gen = new Generator(GENERATOR_CONFIGS[genId]);
+    var gen = new Generator(GENERATOR_CONFIGS[genId]);
     if (!gen.unlocked) {
-      this._showToast(`需要先解锁 ${gen.unlockBuilding ? BUILDING_CONFIGS[gen.unlockBuilding]?.name : '对应建筑'}`);
+      this._showToast('需要先解锁对应建筑');
       return;
     }
-
     if (gen.onCooldown) {
-      this._showToast(`冷却中 ⏳ ${gen.remainingCooldown}s`);
+      this._showToast('冷却中 ' + gen.remainingCooldown + 's');
       return;
     }
 
-    // 点击生成器不消耗能量（经典设计）
-    const item = gen.use();
+    var item = gen.use();
     if (!item) {
       this._showToast('生成器冷却中');
       return;
     }
 
-    const pos = grid.placeItem(item);
+    var pos = grid.placeItem(item);
     if (!pos) {
-      this._showToast('棋盘已满！📦');
+      this._showToast('棋盘已满！');
       return;
     }
 
@@ -398,74 +504,64 @@ class UI {
     this._autoSave();
   }
 
-  // ===== 商店弹窗 =====
-
+  // ===== 商店 =====
   openShop() {
-    const modal = document.getElementById('shop-modal');
+    var modal = document.getElementById('shop-modal');
     if (!modal) return;
 
-    const buildings = BUILDING_CONFIGS;
-    let html = '<div class="shop-content">';
-    html += '<h3>🏪 商店</h3>';
+    var html = '<div class="shop-content">';
+    html += '<h3>Store</h3>';
 
-    // === 能量购买 ===
-    html += '<div class="shop-section"><h4>⚡ 能量</h4>';
-    html += `<div class="shop-item">
-      <span>购买 50 能量</span>
-      <span class="shop-price">💎 5</span>
-      <button onclick="ui._buyEnergy()" ${gameState.diamonds < 5 ? 'disabled' : ''}>购买</button>
-    </div>`;
-    html += `<div class="shop-item">
-      <span>购买 120 能量</span>
-      <span class="shop-price">💎 10</span>
-      <button onclick="ui._buyEnergyLarge()" ${gameState.diamonds < 10 ? 'disabled' : ''}>购买</button>
-    </div></div>`;
+    // 能量
+    html += '<div class="shop-section"><h4>Energy</h4>';
+    html += '<div class="shop-item"><span>Buy 50 Energy</span><span class="shop-price">5 di</span><button onclick="ui._buyEnergy()"' + (gameState.diamonds < 5 ? ' disabled' : '') + '>Buy</button></div>';
+    html += '<div class="shop-item"><span>Buy 120 Energy</span><span class="shop-price">10 di</span><button onclick="ui._buyEnergyLarge()"' + (gameState.diamonds < 10 ? ' disabled' : '') + '>Buy</button></div></div>';
 
-    // === 建筑 ===
-    html += '<div class="shop-section"><h4>🏗️ 建筑</h4>';
-    for (const [id, b] of Object.entries(buildings)) {
-      const existing = gameState.buildings[id];
-      const unlocked = existing && existing.unlocked;
-      const level = existing ? existing.level : 0;
-      const cost = gameState.getBuildingUpgradeCost(id, level + 1);
+    // 建筑
+    html += '<div class="shop-section"><h4>Buildings</h4>';
+    for (var id in BUILDING_CONFIGS) {
+      var b = BUILDING_CONFIGS[id];
+      var existing = gameState.buildings[id];
+      var unlocked = existing && existing.unlocked;
+      var level = existing ? existing.level : 0;
+      var cost = gameState.getBuildingUpgradeCost(id, level + 1);
 
-      html += `<div class="shop-item building-item">
-        <span class="building-emoji">${b.emoji}</span>
-        <span class="building-name">${b.name}</span>
-        <span class="building-level">${unlocked ? `Lv.${level}` : '🔒'}</span>
-        <span class="building-desc">${b.description}</span>
-        ${unlocked && level < 5
-          ? `<button onclick="ui._upgradeBuilding('${id}')" ${gameState.coins < cost ? 'disabled' : ''}>
-              升级 🪙${cost}
-             </button>`
-          : !unlocked && gameState.level >= b.unlockLevel
-            ? `<button onclick="ui._unlockBuilding('${id}')">解锁 🪙${b.unlockCost}</button>`
-            : `<span class="lock-info">Lv.${b.unlockLevel} 解锁</span>`
-        }
-      </div>`;
+      html += '<div class="shop-item building-item">';
+      html += '<span class="building-emoji">' + b.emoji + '</span>';
+      html += '<span class="building-name">' + b.name + '</span>';
+      html += '<span class="building-level">' + (unlocked ? 'Lv.' + level : 'LOCK') + '</span>';
+      html += '<span class="building-desc">' + b.description + '</span>';
+      if (unlocked && level < 5) {
+        html += '<button onclick="ui._upgradeBuilding(\'' + id + '\')"' + (gameState.coins < cost ? ' disabled' : '') + '>Upgrade ' + cost + 'g</button>';
+      } else if (!unlocked && gameState.level >= b.unlockLevel) {
+        html += '<button onclick="ui._unlockBuilding(\'' + id + '\')">Unlock ' + b.unlockCost + 'g</button>';
+      } else {
+        html += '<span class="lock-info">Lv.' + b.unlockLevel + '</span>';
+      }
+      html += '</div>';
     }
     html += '</div>';
 
-    // === 生成器升级 ===
-    html += '<div class="shop-section"><h4>🔧 生成器升级</h4>';
-    const gens = getAllGenerators();
-    for (const gen of gens) {
+    // 生成器升级
+    html += '<div class="shop-section"><h4>Generators</h4>';
+    var gens = getAllGenerators();
+    for (var gi = 0; gi < gens.length; gi++) {
+      var gen = gens[gi];
       if (!gen.unlocked) continue;
-      const cost = gen.upgradeCost;
-      html += `<div class="shop-item">
-        <span>${gen.emoji} ${gen.name} Lv.${gen.level}</span>
-        <span class="gen-info">冷却 ${gen.cooldown}s</span>
-        ${gen.level < 5
-          ? `<button onclick="ui._upgradeGenerator('${gen.id}')" ${gameState.coins < cost ? 'disabled' : ''}>
-              升级 🪙${cost}
-             </button>`
-          : '<span class="max-level">MAX</span>'
-        }
-      </div>`;
+      var cost = gen.upgradeCost;
+      html += '<div class="shop-item">';
+      html += '<span>' + gen.emoji + ' ' + gen.name + ' Lv.' + gen.level + '</span>';
+      html += '<span class="gen-info">' + gen.cooldown + 's</span>';
+      if (gen.level < 5) {
+        html += '<button onclick="ui._upgradeGenerator(\'' + gen.id + '\')"' + (gameState.coins < cost ? ' disabled' : '') + '>Upgrade ' + cost + 'g</button>';
+      } else {
+        html += '<span class="max-level">MAX</span>';
+      }
+      html += '</div>';
     }
     html += '</div>';
 
-    html += `<button onclick="ui.closeShop()" class="close-shop-btn">关闭</button>`;
+    html += '<button onclick="ui.closeShop()" class="close-shop-btn">Close</button>';
     html += '</div>';
 
     modal.innerHTML = html;
@@ -473,19 +569,19 @@ class UI {
   }
 
   closeShop() {
-    const modal = document.getElementById('shop-modal');
+    var modal = document.getElementById('shop-modal');
     if (modal) modal.classList.add('hidden');
     this._renderAll();
   }
 
   _buyEnergy() {
     if (gameState.buyEnergy()) {
-      this._showToast('⚡ +50 能量！');
+      this._showToast('+50 Energy!');
       this.openShop();
       this._renderTopBar();
       this._autoSave();
     } else {
-      this._showToast('钻石不足！');
+      this._showToast('Not enough diamonds!');
     }
   }
 
@@ -493,28 +589,28 @@ class UI {
     if (gameState.diamonds < 10) return;
     gameState.diamonds -= 10;
     gameState.energy = Math.min(gameState.maxEnergy, gameState.energy + 120);
-    this._showToast('⚡ +120 能量！');
+    this._showToast('+120 Energy!');
     this.openShop();
     this._renderTopBar();
     this._autoSave();
   }
 
   _unlockBuilding(buildingId) {
-    const b = BUILDING_CONFIGS[buildingId];
+    var b = BUILDING_CONFIGS[buildingId];
     if (!b) return;
     if (gameState.coins < b.unlockCost) {
-      this._showToast('金币不足！');
+      this._showToast('Not enough coins!');
       return;
     }
     gameState.coins -= b.unlockCost;
     gameState.unlockBuilding(buildingId);
     // 解锁对应的生成器
-    for (const [genId, genConfig] of Object.entries(GENERATOR_CONFIGS)) {
+    for (var genId in GENERATOR_CONFIGS) {
+      var genConfig = GENERATOR_CONFIGS[genId];
       if (genConfig.unlockBuilding === buildingId) {
         gameState.unlockGenerator(genId);
-        // 解锁对应的物品链
         gameState.unlockChain(genConfig.chain);
-        this._showToast(`${b.emoji} ${b.name} 已解锁！解锁了 ${genConfig.name}！`);
+        this._showToast(b.emoji + ' ' + b.name + ' unlocked! ' + genConfig.name + ' available!');
         break;
       }
     }
@@ -524,109 +620,108 @@ class UI {
 
   _upgradeBuilding(buildingId) {
     if (gameState.upgradeBuilding(buildingId)) {
-      this._showToast('🏗️ 建筑升级成功！生成器效率提升！');
+      this._showToast('Building upgraded!');
       this.openShop();
       this._autoSave();
     } else {
-      this._showToast('金币不足！');
+      this._showToast('Not enough coins!');
     }
   }
 
   _upgradeGenerator(genId) {
-    const gen = new Generator(GENERATOR_CONFIGS[genId]);
+    var gen = new Generator(GENERATOR_CONFIGS[genId]);
     if (gen.upgrade()) {
-      this._showToast(`🔧 ${gen.name} 升级成功！冷却缩短！`);
+      this._showToast(gen.name + ' upgraded!');
       this.openShop();
       this._autoSave();
     } else {
-      this._showToast('金币不足或已达最高级！');
+      this._showToast('Not enough coins or max level!');
     }
   }
 
   // ===== 特效 =====
-
   _showMergeEffect(row, col) {
-    const cell = document.querySelector(`.grid-cell[data-row="${row}"][data-col="${col}"]`);
+    var cell = document.querySelector('.grid-cell[data-row="' + row + '"][data-col="' + col + '"]');
     if (!cell) return;
     cell.classList.add('merge-flash');
-    setTimeout(() => cell.classList.remove('merge-flash'), 500);
+    var self = this;
+    setTimeout(function() { cell.classList.remove('merge-flash'); }, 500);
   }
 
   _showProduceEffect(row, col) {
-    const cell = document.querySelector(`.grid-cell[data-row="${row}"][data-col="${col}"]`);
+    var cell = document.querySelector('.grid-cell[data-row="' + row + '"][data-col="' + col + '"]');
     if (!cell) return;
     cell.classList.add('item-appear');
-    setTimeout(() => cell.classList.remove('item-appear'), 400);
+    var self = this;
+    setTimeout(function() { cell.classList.remove('item-appear'); }, 400);
   }
 
   _showReward(rewards) {
-    const toast = document.getElementById('reward-toast');
+    var toast = document.getElementById('reward-toast');
     if (!toast) return;
-    toast.innerHTML = `
-      <div class="reward-content">
-        <div class="reward-title">🎉 订单完成！</div>
-        <div class="reward-items">
-          ${rewards.coins ? `<span>🪙 +${rewards.coins}</span>` : ''}
-          ${rewards.exp ? `<span>⭐ +${rewards.exp}</span>` : ''}
-          ${rewards.diamonds ? `<span>💎 +${rewards.diamonds}</span>` : ''}
-        </div>
-      </div>
-    `;
+    var html = '' +
+      '<div class="reward-content">' +
+      '<div class="reward-title">Order Complete!</div>' +
+      '<div class="reward-items">';
+    if (rewards.coins) html += '<span>+' + rewards.coins + 'g</span>';
+    if (rewards.exp) html += '<span>+' + rewards.exp + 'xp</span>';
+    if (rewards.diamonds) html += '<span>+' + rewards.diamonds + 'di</span>';
+    html += '</div></div>';
+    toast.innerHTML = html;
     toast.classList.remove('hidden');
     toast.classList.add('reward-pop');
-    setTimeout(() => {
+    var self = this;
+    setTimeout(function() {
       toast.classList.add('hidden');
       toast.classList.remove('reward-pop');
     }, 2000);
   }
 
   _showToast(message) {
-    const toast = document.getElementById('toast');
+    var toast = document.getElementById('toast');
     if (!toast) return;
     toast.textContent = message;
     toast.classList.remove('hidden');
     toast.classList.add('toast-pop');
-    setTimeout(() => {
+    var self = this;
+    setTimeout(function() {
       toast.classList.add('hidden');
       toast.classList.remove('toast-pop');
     }, 1500);
   }
 
   // ===== 定时器 =====
-
   _startTimers() {
-    // 能量恢复（每秒检查）
-    this.energyTimer = setInterval(() => {
+    var self = this;
+    this.energyTimer = setInterval(function() {
       gameState.tickEnergy();
-      this._renderTopBar();
+      self._renderTopBar();
     }, 1000);
 
-    // 生成器冷却更新（每秒）
-    this.cooldownTimer = setInterval(() => {
-      this._renderGenerators();
+    this.cooldownTimer = setInterval(function() {
+      self._renderGenerators();
     }, 1000);
 
-    // 自动生成器（每秒检查）
-    this.autoTimer = setInterval(() => {
-      const gens = getAllGenerators();
-      for (const gen of gens) {
+    this.autoTimer = setInterval(function() {
+      var gens = getAllGenerators();
+      for (var gi = 0; gi < gens.length; gi++) {
+        var gen = gens[gi];
         if (!gen.unlocked || gen.type !== 'auto') continue;
         if (gen.onCooldown) continue;
-        const item = gen.use();
+        var item = gen.use();
         if (item) {
-          const pos = grid.placeItem(item);
+          var pos = grid.placeItem(item);
           if (pos) {
-            this._showProduceEffect(pos.row, pos.col);
-            this._renderAll();
-            this._autoSave();
+            self._showProduceEffect(pos.row, pos.col);
+            self._renderAll();
+            self._autoSave();
           }
         }
       }
     }, 1000);
 
-    // 自动存档（每 30 秒）
-    this.saveTimer = setInterval(() => {
-      this._autoSave();
+    this.saveTimer = setInterval(function() {
+      self._autoSave();
     }, 30000);
   }
 
@@ -635,68 +730,61 @@ class UI {
   }
 
   _bindGlobalEvents() {
-    // 点击空白处关闭菜单
-    document.addEventListener('click', (e) => {
+    var self = this;
+    document.addEventListener('click', function(e) {
       if (e.target.closest('.menu-content') || e.target.closest('.grid-cell')) return;
-      this._hideItemMenu();
+      self._hideItemMenu();
     });
-  }
-
-  _bindGridEvents() {
-    // 键盘快捷键
-    document.addEventListener('keydown', (e) => {
+    document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape') {
-        this._hideItemMenu();
-        this.closeShop();
+        self._hideItemMenu();
+        self.closeShop();
       }
     });
   }
 }
 
-// 全局 UI 实例
-const ui = new UI();
+var ui = new UI();
 
-// ===== 建筑配置 =====
-
-const BUILDING_CONFIGS = {
+var BUILDING_CONFIGS = {
   bakery: {
-    name: '面包店',
-    emoji: '🥖',
-    description: '解锁菜篮生成器（面包链）',
+    name: 'Bakery',
+    emoji: 'BREAD',
+    description: 'Unlocks Basket generator (Bread chain)',
     unlockLevel: 1,
     unlockCost: 0,
-    effect: '缩短面包产出冷却'
+    effect: 'Shortens bread cooldown'
   },
   cafe: {
-    name: '咖啡馆',
-    emoji: '☕',
-    description: '解锁咖啡壶生成器（咖啡链）',
+    name: 'Cafe',
+    emoji: 'COFFEE',
+    description: 'Unlocks Coffee Pot generator (Coffee chain)',
     unlockLevel: 3,
     unlockCost: 200,
-    effect: '缩短咖啡产出冷却'
+    effect: 'Shortens coffee cooldown'
   },
   flower_shop: {
-    name: '花店',
-    emoji: '💐',
-    description: '解锁花丛自动生成器（花链）',
+    name: 'Flower Shop',
+    emoji: 'FLOWER',
+    description: 'Unlocks Flower Bush auto generator (Flower chain)',
     unlockLevel: 5,
     unlockCost: 500,
-    effect: '缩短花丛产出间隔'
+    effect: 'Shortens flower cooldown'
   },
   workshop: {
-    name: '工坊',
-    emoji: '🔧',
-    description: '解锁工具箱生成器（工具链）',
+    name: 'Workshop',
+    emoji: 'TOOL',
+    description: 'Unlocks Tool Box generator (Tool chain)',
     unlockLevel: 7,
     unlockCost: 1000,
-    effect: '缩短工具产出冷却'
+    effect: 'Shortens tool cooldown'
   },
   tailor: {
-    name: '裁缝店',
-    emoji: '👗',
-    description: '解锁缝纫机生成器（装饰链）',
+    name: 'Tailor',
+    emoji: 'DECOR',
+    description: 'Unlocks Sewing Machine generator (Decor chain)',
     unlockLevel: 9,
     unlockCost: 2000,
-    effect: '缩短装饰产出冷却'
+    effect: 'Shortens decor cooldown'
   }
 };
