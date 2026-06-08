@@ -1,8 +1,10 @@
 /**
- * Generator.js - 生成器系统 V2
- * 每个生成器有独立冷却，产出对应物品链
- * 生成器升级后冷却缩短、产出高等级概率提升
+ * Generator.js - 生成器系统 V3
+ * 点击消耗能量产出物品，无冷却
+ * 升级提升高等级产出概率
  */
+
+const GENERATOR_ENERGY_COST = 5;  // 每次点击消耗 5 能量
 
 class Generator {
   constructor(config) {
@@ -11,7 +13,6 @@ class Generator {
     this.emoji = config.emoji;
     this.type = config.type;         // 'click' | 'auto'
     this.chain = config.chain;       // 对应的物品链
-    this.baseCooldown = config.baseCooldown || 0;  // 冷却时间（秒）
     this.produceTable = config.produceTable;
     this.unlockLevel = config.unlockLevel || 1;
     this.unlockBuilding = config.unlockBuilding || null;
@@ -33,32 +34,13 @@ class Generator {
     return gameState.generators[this.id] !== undefined;
   }
 
-  /** 当前冷却时间（秒），随等级缩短 */
-  get cooldown() {
-    return Math.max(1, Math.floor(this.baseCooldown * Math.pow(0.85, this.level - 1)));
-  }
-
-  /** 当前剩余冷却时间（秒） */
-  get remainingCooldown() {
-    const g = gameState.generators[this.id];
-    if (!g || !g.cooldownUntil) return 0;
-    const now = Date.now();
-    if (now >= g.cooldownUntil) return 0;
-    return Math.ceil((g.cooldownUntil - now) / 1000);
-  }
-
-  /** 是否冷却中 */
-  get onCooldown() {
-    return this.remainingCooldown > 0;
-  }
-
-  /** 使用生成器 */
+  /** 使用生成器（消耗能量） */
   use() {
-    if (!this.unlocked || this.onCooldown) return null;
+    if (!this.unlocked) return null;
+    // 消耗能量
+    if (!gameState.spendEnergy(GENERATOR_ENERGY_COST)) return null;
     const g = gameState.generators[this.id];
     g.uses++;
-    // 设置冷却
-    g.cooldownUntil = Date.now() + this.cooldown * 1000;
     // 产出物品
     return this.rollItem();
   }
@@ -116,7 +98,6 @@ const GENERATOR_CONFIGS = {
     emoji: '🧺',
     type: 'click',
     chain: 'bread',
-    baseCooldown: 2,  // 2 秒冷却
     unlockLevel: 1,
     unlockBuilding: 'bakery',
     description: '产出小麦（面包链）',
@@ -132,7 +113,6 @@ const GENERATOR_CONFIGS = {
     emoji: '☕',
     type: 'click',
     chain: 'coffee',
-    baseCooldown: 3,
     unlockLevel: 3,
     unlockBuilding: 'cafe',
     description: '产出咖啡豆（咖啡链）',
@@ -146,12 +126,11 @@ const GENERATOR_CONFIGS = {
     id: 'flower_bush',
     name: '花丛',
     emoji: '🌸',
-    type: 'auto',
+    type: 'click',
     chain: 'flower',
-    baseCooldown: 15,  // 15 秒自动产出
     unlockLevel: 5,
     unlockBuilding: 'flower_shop',
-    description: '自动产出种子（花链）',
+    description: '产出种子（花链）',
     produceTable: [
       { probability: 0.90, level: 1 },
       { probability: 0.08, level: 2 },
@@ -164,7 +143,6 @@ const GENERATOR_CONFIGS = {
     emoji: '🧰',
     type: 'click',
     chain: 'tool',
-    baseCooldown: 5,
     unlockLevel: 7,
     unlockBuilding: 'workshop',
     description: '产出木材（工具链）',
@@ -180,7 +158,6 @@ const GENERATOR_CONFIGS = {
     emoji: '🪡',
     type: 'click',
     chain: 'decor',
-    baseCooldown: 6,
     unlockLevel: 9,
     unlockBuilding: 'tailor',
     description: '产出布料（装饰链）',
