@@ -1,0 +1,79 @@
+/* ===== 合成闪光动画 ===== */
+@keyframes merge-flash {
+  0% { transform: scale(1); opacity: 1; }
+  30% { transform: scale(1.3); opacity: 0.7; filter: brightness(1.5); }
+  60% { transform: scale(0.9); }
+  100% { transform: scale(1); opacity: 1; filter: brightness(1); }
+}
+
+.merge-flash .grid-item {
+  animation: merge-flash 0.5s ease-out;
+}
+
+/* ===== 新物品出现动画 ===== */
+@keyframes item-appear {
+  0% { transform: scale(0); opacity: 0; }
+  50% { transform: scale(1.2); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.item-appear .grid-item {
+  animation: item-appear 0.4s ease-out;
+}
+
+/* ===== 奖励弹出动画 ===== */
+@keyframes reward-pop {
+  0% { transform: scale(0.5); opacity: 0; }
+  60% { transform: scale(1.1); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.reward-pop {
+  animation: reward-pop 0.4s ease-out;
+}
+
+/* ===== Toast 弹出动画 ===== */
+@keyframes toast-pop {
+  0% { transform: translate(-50%, -50%) scale(0.8); opacity: 0; }
+  50% { transform: translate(-50%, -50%) scale(1.05); }
+  100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+}
+
+.toast-pop {
+  animation: toast-pop 0.3s ease-out;
+}
+
+/* ===== 能量不足抖动 ===== */
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-4px); }
+  40% { transform: translateX(4px); }
+  60% { transform: translateX(-3px); }
+  80% { transform: translateX(3px); }
+}
+
+.shake {
+  animation: shake 0.4s ease;
+}
+
+/* ===== 拖拽时的样式 ===== */
+.grid-cell.dragging {
+  opacity: 0.3;
+  transition: opacity 0.1s;
+}
+
+/* ===== 合成时的粒子效果（纯 CSS 模拟） ===== */
+@keyframes sparkle {
+  0% { transform: translate(0, 0) scale( permalink); opacity: 1; }
+  100% { transform: translate(var(--dx), var(--dy)) scale(0); opacity: 0; }
+}
+
+.merge-flash::after {
+  content: '✨';
+  position: absolute;
+  font-size: 16px;
+  animation: sparkle 0.5s ease-out;
+  --dx: -10px;
+  --dy: -10px;
+  pointer-events: none;
+}
